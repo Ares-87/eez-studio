@@ -339,14 +339,19 @@ export const NativeVariableImplementationInfoPropertyUI = observer(
 type DibField = "input" | "output" | "input-output" | undefined;
 
 
-function isNativeVariableDisabled(variable: Variable) {
+// type can be given explicitly when variable.type is not set yet (while loading)
+function isNativeVariableDisabled(
+    variable: Variable,
+    type: ValueType = variable.type
+) {
     const project = ProjectEditor.getProject(variable);
+    if (!project.projectTypeTraits) {
+        return false;
+    }
     return (
         !isGlobalVariable(variable) ||
         !hasFlowSupport(variable) ||
-        !project.projectTypeTraits.isVariableTypeSupportedAsNative(
-            variable.type
-        ) ||
+        !project.projectTypeTraits.isVariableTypeSupportedAsNative(type) ||
         !!project.settings.general.masterProject
     );
 }
@@ -366,6 +371,9 @@ export class Variable extends EezObject {
     native: boolean;
     dibField: DibField;
     dibFieldUnit: string | undefined;
+    // samples per second, if set the module streams the field samples (YT
+    // graphs, data logging) at the rate BB3+ asks for, up to this rate
+    dibFieldMaxSampleRate: number | undefined;
 
     constructor() {
         super();
@@ -390,7 +398,8 @@ export class Variable extends EezObject {
             persistent: observable,
             native: observable,
             dibField: observable,
-            dibFieldUnit: observable
+            dibFieldUnit: observable,
+            dibFieldMaxSampleRate: observable
         });
     }
 
@@ -464,7 +473,8 @@ export class Variable extends EezObject {
             {
                 name: "native",
                 type: PropertyType.Boolean,
-                disabled: isNativeVariableDisabled,
+                disabled: (variable: Variable) =>
+                    isNativeVariableDisabled(variable),
                 checkboxStyleSwitch: true
             },
             {
@@ -558,6 +568,17 @@ export class Variable extends EezObject {
                     !ProjectEditor.getProject(variable).dibModuleMetadata ||
                     variable.dibField == undefined ||
                     variable.type != "float"
+            },
+            {
+                name: "dibFieldMaxSampleRate",
+                displayName: "DIB field max sample rate (S/s)",
+                type: PropertyType.Number,
+                isOptional: true,
+                disabled: (variable: Variable) =>
+                    !isGlobalVariable(variable) ||
+                    !ProjectEditor.getProject(variable).dibModuleMetadata ||
+                    variable.dibField == undefined ||
+                    (variable.type != "float" && variable.type != "integer")
             }
         ],
         icon: VARIABLE_ICON,
@@ -591,6 +612,19 @@ export class Variable extends EezObject {
                                 PERSISTENT
                             </span>
                         )}
+                    {!isPropertyDisabled(
+                        variable,
+                        findPropertyByNameInObject(
+                            variable,
+                            "dibFieldMaxSampleRate"
+                        )!
+                    ) &&
+                        variable.dibFieldMaxSampleRate != undefined &&
+                        variable.dibFieldMaxSampleRate > 0 && (
+                            <span className="EezStudio_ListLabel_Badge">
+                                SAMPLED
+                            </span>
+                        )}
                     <span>{variable.name}</span>
                     <em
                         className="font-monospace"
@@ -609,7 +643,8 @@ export class Variable extends EezObject {
         beforeLoadHook: (object: Variable, objectJS: any) => {
             migrateType(objectJS);
 
-            if (isNativeVariableDisabled(object)) {
+            // object properties are not loaded yet, use the type from objectJS
+            if (isNativeVariableDisabled(object, objectJS.type)) {
                 objectJS.native = false;
             }
         },

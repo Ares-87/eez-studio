@@ -52,6 +52,7 @@ import {
     checkObjectReference,
     findBitmap
 } from "project-editor/project/project";
+import { findFont } from "project-editor/project/assets";
 
 import type {
     IDataContext,
@@ -102,6 +103,7 @@ import {
     WIDGET_TYPE_LINE_CHART,
     WIDGET_TYPE_BUTTON_GROUP,
     WIDGET_TYPE_QR_CODE,
+    WIDGET_TYPE_YT_CHART,
     WIDGET_TYPE_DROP_DOWN_LIST,
     WIDGET_TYPE_PROGRESS,
     WIDGET_TYPE_BUTTON,
@@ -158,12 +160,44 @@ enum DisplayOption {
     FractionAndUnit = 2,
     Fraction = 3,
     Unit = 4,
-    IntegerAndFraction = 5
+    IntegerAndFraction = 5,
+    IntegerUnitAndFraction = 6
+}
+
+function findStartOfFraction(text: string) {
+    let i;
+    for (
+        i = 0;
+        text[i] &&
+        (text[i] == "<" ||
+            text[i] == " " ||
+            text[i] == "-" ||
+            (text[i] >= "0" && text[i] <= "9"));
+        i++
+    ) {}
+    return i;
+}
+
+function findStartOfUnit(text: string) {
+    let i;
+    for (
+        i = 0;
+        text[i] &&
+        (text[i] == "<" ||
+            text[i] == " " ||
+            text[i] == "-" ||
+            (text[i] >= "0" && text[i] <= "9") ||
+            text[i] == ".");
+        i++
+    ) {}
+    return i;
 }
 
 export class DisplayDataWidget extends Widget {
+    preview: string;
     focusStyle: Style;
     displayOption: DisplayOption;
+    unitAndFractionFont: string;
     refreshRate: string;
 
     static classInfo = makeDerivedClassInfo(Widget.classInfo, {
@@ -176,6 +210,12 @@ export class DisplayDataWidget extends Widget {
 
         properties: [
             makeDataPropertyInfo("data", {}, "any"),
+            // shown in the editor instead of the data, not built
+            {
+                name: "preview",
+                type: PropertyType.String,
+                propertyGridGroup: specificGroup
+            },
             makeStylePropertyInfo("style", "Default style"),
             Object.assign(
                 makeStylePropertyInfo("focusStyle", "Focused style"),
@@ -211,9 +251,23 @@ export class DisplayDataWidget extends Widget {
                     {
                         id: DisplayOption.IntegerAndFraction,
                         label: "Integer and fraction"
+                    },
+                    {
+                        id: DisplayOption.IntegerUnitAndFraction,
+                        label: "Integer, unit and fraction"
                     }
                 ],
                 propertyGridGroup: specificGroup
+            },
+            {
+                name: "unitAndFractionFont",
+                displayName: "Unit and fraction font",
+                type: PropertyType.ObjectReference,
+                referencedObjectCollectionPath: "fonts",
+                propertyGridGroup: specificGroup,
+                hideInPropertyGrid: (widget: DisplayDataWidget) =>
+                    widget.displayOption !=
+                    DisplayOption.IntegerUnitAndFraction
             },
             makeDataPropertyInfo("refreshRate", {
                 disabled: hasNotFlowSupport
@@ -272,6 +326,12 @@ export class DisplayDataWidget extends Widget {
                     );
                 }
             }
+
+            if (
+                object.displayOption === DisplayOption.IntegerUnitAndFraction
+            ) {
+                checkObjectReference(object, "unitAndFractionFont", messages);
+            }
         }
     });
 
@@ -279,8 +339,10 @@ export class DisplayDataWidget extends Widget {
         super.makeEditable();
 
         makeObservable(this, {
+            preview: observable,
             focusStyle: observable,
             displayOption: observable,
+            unitAndFractionFont: observable,
             refreshRate: observable
         });
     }
@@ -288,53 +350,25 @@ export class DisplayDataWidget extends Widget {
     applyDisplayOption(text: string) {
         text = text.toString();
 
-        function findStartOfFraction() {
-            let i;
-            for (
-                i = 0;
-                text[i] &&
-                (text[i] == "<" ||
-                    text[i] == " " ||
-                    text[i] == "-" ||
-                    (text[i] >= "0" && text[i] <= "9"));
-                i++
-            ) {}
-            return i;
-        }
-
-        function findStartOfUnit(i: number) {
-            for (
-                i = 0;
-                text[i] &&
-                (text[i] == "<" ||
-                    text[i] == " " ||
-                    text[i] == "-" ||
-                    (text[i] >= "0" && text[i] <= "9") ||
-                    text[i] == ".");
-                i++
-            ) {}
-            return i;
-        }
-
         if (this.displayOption === DisplayOption.Integer) {
-            let i = findStartOfFraction();
+            let i = findStartOfFraction(text);
             text = text.substr(0, i);
         } else if (this.displayOption === DisplayOption.FractionAndUnit) {
-            let i = findStartOfFraction();
+            let i = findStartOfFraction(text);
             text = text.substr(i);
         } else if (this.displayOption === DisplayOption.Fraction) {
-            let i = findStartOfFraction();
-            let k = findStartOfUnit(i);
+            let i = findStartOfFraction(text);
+            let k = findStartOfUnit(text);
             if (i < k) {
                 text = text.substring(i, k);
             } else {
                 text = ".00";
             }
         } else if (this.displayOption === DisplayOption.Unit) {
-            let i = findStartOfUnit(0);
+            let i = findStartOfUnit(text);
             text = text.substr(i);
         } else if (this.displayOption === DisplayOption.IntegerAndFraction) {
-            let i = findStartOfUnit(0);
+            let i = findStartOfUnit(text);
             text = text.substr(0, i);
         }
 
@@ -345,14 +379,28 @@ export class DisplayDataWidget extends Widget {
         return text;
     }
 
+    // same split as in the firmware, text that is not a number (firmware:
+    // value that is not a float) is displayed whole as the integer part
+    splitIntegerUnitAndFraction(text: string) {
+        let i = findStartOfFraction(text);
+        let k = findStartOfUnit(text);
+
+        if (!/[0-9]/.test(text.substring(0, k))) {
+            return { integer: text.trim(), unit: "", fraction: "" };
+        }
+
+        return {
+            integer: text.substring(0, i).trim(),
+            unit: text.substring(k).trim(),
+            fraction: i < k ? text.substring(i, k).trim() : ".0"
+        };
+    }
+
     override render(flowContext: IFlowContext, width: number, height: number) {
-        const result = getTextValue(
-            flowContext,
-            this,
-            "data",
-            undefined,
-            undefined
-        );
+        const result =
+            !flowContext.flowState && this.preview
+                ? this.preview
+                : getTextValue(flowContext, this, "data", undefined, undefined);
 
         let text = this.applyDisplayOption(
             typeof result == "object" ? result.text : result
@@ -366,16 +414,41 @@ export class DisplayDataWidget extends Widget {
                     height={height}
                     draw={(ctx: CanvasRenderingContext2D) => {
                         eezGuiDraw.setProject(flowContext.projectStore.project);
-                        eezGuiDraw.drawText(
-                            ctx,
-                            text,
-                            0,
-                            0,
-                            width,
-                            height,
-                            this.style,
-                            false
-                        );
+                        if (
+                            this.displayOption ===
+                            DisplayOption.IntegerUnitAndFraction
+                        ) {
+                            const { integer, unit, fraction } =
+                                this.splitIntegerUnitAndFraction(
+                                    eezGuiDraw.unescapeText(text)
+                                );
+                            eezGuiDraw.drawIntegerUnitAndFraction(
+                                ctx,
+                                integer,
+                                unit,
+                                fraction,
+                                0,
+                                0,
+                                width,
+                                height,
+                                this.style,
+                                findFont(
+                                    getProject(this),
+                                    this.unitAndFractionFont
+                                )
+                            );
+                        } else {
+                            eezGuiDraw.drawText(
+                                ctx,
+                                text,
+                                0,
+                                0,
+                                width,
+                                height,
+                                this.style,
+                                false
+                            );
+                        }
                     }}
                 />
                 {super.render(flowContext, width, height)}
@@ -395,6 +468,17 @@ export class DisplayDataWidget extends Widget {
 
         // displayOption
         dataBuffer.writeUint8(this.displayOption || 0);
+
+        // reserved1
+        dataBuffer.writeUint8(0);
+
+        // unitAndFractionFont
+        dataBuffer.writeInt16(
+            this.displayOption == DisplayOption.IntegerUnitAndFraction &&
+                this.unitAndFractionFont
+                ? assets.getFontIndex(this, "unitAndFractionFont")
+                : 0
+        );
     }
 }
 
@@ -2801,6 +2885,396 @@ export class YTGraphWidget extends Widget {
 }
 
 registerClass("YTGraphWidget", YTGraphWidget);
+
+////////////////////////////////////////////////////////////////////////////////
+
+// sampled DIB fields of the DIB module project (the fields with a YT history)
+function getSampledDibFields(object: IEezObject) {
+    const dibModuleMetadata = ProjectEditor.getProject(object).dibModuleMetadata;
+    if (!dibModuleMetadata) {
+        return [];
+    }
+    return dibModuleMetadata.dibFields.filter(
+        variable =>
+            (variable.type == "float" || variable.type == "integer") &&
+            variable.dibFieldMaxSampleRate != undefined &&
+            variable.dibFieldMaxSampleRate > 0
+    );
+}
+
+// bit of a bit field (integer DIB field) drawn as a digital trace, its YT
+// history value is the AND of the samples in bits 0..7 and the OR in bits
+// 8..15, so only bits 0..7
+const YT_CHART_MAX_BIT = 7;
+
+function isBitTrace(trace: YTChartTrace) {
+    return trace.bit != undefined;
+}
+
+class YTChartTrace extends EezObject {
+    field: string;
+    bit: number | undefined;
+    color: string;
+    min: string;
+    max: string;
+    visible: string;
+
+    static classInfo: ClassInfo = {
+        listLabel: (trace: YTChartTrace) =>
+            (trace.field || "") +
+            (isBitTrace(trace) ? ` bit ${trace.bit}` : ""),
+        properties: [
+            {
+                name: "field",
+                displayName: "DIB field",
+                type: PropertyType.Enum,
+                enumItems: (trace: YTChartTrace) =>
+                    getSampledDibFields(trace).map(variable => ({
+                        id: variable.name
+                    }))
+            },
+            {
+                name: "bit",
+                displayName: `Bit (0 - ${YT_CHART_MAX_BIT}, a digital trace in its own lane)`,
+                type: PropertyType.Number,
+                isOptional: true
+            },
+            {
+                name: "color",
+                type: PropertyType.Color,
+                propertyGridGroup: specificGroup
+            },
+            makeExpressionProperty(
+                {
+                    name: "min",
+                    type: PropertyType.MultilineText,
+                    disabled: isBitTrace
+                },
+                "float"
+            ),
+            makeExpressionProperty(
+                {
+                    name: "max",
+                    type: PropertyType.MultilineText,
+                    disabled: isBitTrace
+                },
+                "float"
+            ),
+            makeExpressionProperty(
+                {
+                    name: "visible",
+                    type: PropertyType.MultilineText
+                },
+                "boolean"
+            )
+        ],
+        check: (trace: YTChartTrace, messages: IMessage[]) => {
+            if (!trace.field) {
+                messages.push(propertyNotSetMessage(trace, "field"));
+            } else if (
+                !getSampledDibFields(trace).find(
+                    variable => variable.name == trace.field
+                )
+            ) {
+                messages.push(
+                    new Message(
+                        MessageType.ERROR,
+                        `"${trace.field}" is not a sampled DIB field (set "DIB field max sample rate" of the variable)`,
+                        getChildOfObject(trace, "field")
+                    )
+                );
+            }
+
+            if (isBitTrace(trace)) {
+                const variable = getSampledDibFields(trace).find(
+                    variable => variable.name == trace.field
+                );
+                if (
+                    !Number.isInteger(trace.bit) ||
+                    trace.bit! < 0 ||
+                    trace.bit! > YT_CHART_MAX_BIT
+                ) {
+                    messages.push(
+                        new Message(
+                            MessageType.ERROR,
+                            `Bit must be 0 - ${YT_CHART_MAX_BIT}`,
+                            getChildOfObject(trace, "bit")
+                        )
+                    );
+                } else if (variable && variable.type != "integer") {
+                    messages.push(
+                        new Message(
+                            MessageType.ERROR,
+                            `A bit trace needs an integer DIB field (a bit field)`,
+                            getChildOfObject(trace, "bit")
+                        )
+                    );
+                }
+            }
+
+            const widget = getParent(getParent(trace)!)! as YTChartWidget;
+            for (const propertyName of isBitTrace(trace)
+                ? ["visible"]
+                : ["min", "max", "visible"]) {
+                try {
+                    checkExpression(widget, (trace as any)[propertyName]);
+                } catch (err) {
+                    messages.push(
+                        new Message(
+                            MessageType.ERROR,
+                            `Invalid expression: ${err}`,
+                            getChildOfObject(trace, propertyName)
+                        )
+                    );
+                }
+            }
+        },
+        defaultValue: {
+            color: "#ffff00",
+            min: "0",
+            max: "1",
+            visible: "true"
+        }
+    };
+
+    override makeEditable() {
+        super.makeEditable();
+
+        makeObservable(this, {
+            field: observable,
+            bit: observable,
+            color: observable,
+            min: observable,
+            max: observable,
+            visible: observable
+        });
+    }
+}
+
+// YT graph of any number of sampled DIB fields of the module, one value of
+// the field YT history (recorded by BB3+ at the slot YT rate) per pixel
+// column, in the scroll or the scan mode.
+export class YTChartWidget extends Widget {
+    traces: YTChartTrace[];
+    mode: string;
+
+    static classInfo = makeDerivedClassInfo(Widget.classInfo, {
+        enabledInComponentPalette: (
+            projectType: ProjectType,
+            projectStore?: ProjectStore
+        ) =>
+            projectType !== ProjectType.LVGL &&
+            projectType !== ProjectType.DASHBOARD &&
+            projectType !== ProjectType.EEZ_GUI_LITE &&
+            !!projectStore?.project.dibModuleMetadata,
+
+        componentPaletteGroupName: "!1Visualiser",
+
+        flowComponentId: WIDGET_TYPE_YT_CHART,
+
+        properties: [
+            Object.assign(makeDataPropertyInfo("data"), {
+                hideInPropertyGrid: true
+            }),
+            {
+                name: "traces",
+                type: PropertyType.Array,
+                typeClass: YTChartTrace,
+                propertyGridGroup: specificGroup,
+                partOfNavigation: false,
+                enumerable: false,
+                defaultValue: []
+            },
+            makeDataPropertyInfo(
+                "mode",
+                { displayName: "Mode (0 - scroll, 1 - scan)" },
+                "integer"
+            )
+        ],
+
+        defaultValue: {
+            left: 0,
+            top: 0,
+            width: 320,
+            height: 160,
+            traces: [],
+            mode: "0"
+        },
+
+        icon: (
+            <svg
+                viewBox="0 0 24 24"
+                strokeWidth="2"
+                stroke="currentColor"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            >
+                <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                <line x1="4" y1="19" x2="20" y2="19"></line>
+                <polyline points="4 15 8 9 12 11 16 6 20 10"></polyline>
+                <polyline points="4 12 8 14 12 9 16 13 20 12"></polyline>
+            </svg>
+        ),
+
+        check: (object: YTChartWidget, messages: IMessage[]) => {
+            if (!getProject(object).dibModuleMetadata) {
+                messages.push(
+                    new Message(
+                        MessageType.ERROR,
+                        "YTChart widget is supported only in the DIB module projects",
+                        object
+                    )
+                );
+            }
+        }
+    });
+
+    override makeEditable() {
+        super.makeEditable();
+
+        makeObservable(this, {
+            traces: observable,
+            mode: observable
+        });
+    }
+
+    override render(flowContext: IFlowContext, width: number, height: number) {
+        return (
+            <>
+                <ComponentCanvas
+                    component={this}
+                    width={width}
+                    height={height}
+                    draw={(ctx: CanvasRenderingContext2D) => {
+                        eezGuiDraw.setProject(flowContext.projectStore.project);
+
+                        eezGuiDraw.drawBackground(
+                            ctx,
+                            0,
+                            0,
+                            width,
+                            height,
+                            this.style,
+                            true
+                        );
+
+                        // the value traces as sine waves, the bit traces
+                        // as square waves in their lanes, to show their
+                        // colors
+                        const bitTraces = this.traces.filter(isBitTrace);
+                        this.traces.forEach((trace, traceIndex) => {
+                            eezGuiDraw.setColor(trace.color);
+                            ctx.strokeStyle = eezGuiDraw.getColor();
+                            ctx.lineWidth = 1;
+                            ctx.beginPath();
+                            const lane = bitTraces.indexOf(trace);
+                            if (lane != -1) {
+                                const laneTop = Math.floor(
+                                    (height * lane) / bitTraces.length
+                                );
+                                const laneHeight =
+                                    Math.floor(
+                                        (height * (lane + 1)) /
+                                            bitTraces.length
+                                    ) - laneTop;
+                                const margin =
+                                    laneHeight >= 5
+                                        ? Math.floor(laneHeight / 5)
+                                        : 0;
+                                const yHigh = laneTop + margin + 0.5;
+                                const yLow =
+                                    laneTop + laneHeight - 1 - margin + 0.5;
+                                // the bit of a binary counter
+                                const halfPeriod = 8 << lane;
+                                for (let x = 0; x < width; x++) {
+                                    const y =
+                                        Math.floor(x / halfPeriod) % 2
+                                            ? yHigh
+                                            : yLow;
+                                    if (x == 0) {
+                                        ctx.moveTo(x + 0.5, y);
+                                    } else {
+                                        ctx.lineTo(x + 0.5, y);
+                                    }
+                                }
+                                ctx.stroke();
+                                return;
+                            }
+                            for (let x = 0; x < width; x++) {
+                                const y =
+                                    height / 2 +
+                                    (height / 3) *
+                                        Math.sin(
+                                            (x / width) * 4 * Math.PI +
+                                                (traceIndex * Math.PI) / 3
+                                        );
+                                if (x == 0) {
+                                    ctx.moveTo(x + 0.5, y);
+                                } else {
+                                    ctx.lineTo(x + 0.5, y);
+                                }
+                            }
+                            ctx.stroke();
+                        });
+                    }}
+                />
+                {super.render(flowContext, width, height)}
+            </>
+        );
+    }
+
+    buildFlowWidgetSpecific(assets: Assets, dataBuffer: DataBuffer) {
+        // mode
+        dataBuffer.writeInt16(assets.getWidgetDataItemIndex(this, "mode"));
+
+        // component index
+        dataBuffer.writeUint16(assets.getComponentIndex(this));
+    }
+
+    buildFlowComponentSpecific(assets: Assets, dataBuffer: DataBuffer) {
+        const dibModuleMetadata = assets.projectStore.project.dibModuleMetadata;
+
+        // traces
+        dataBuffer.writeArray(this.traces, trace => {
+            // fieldIndex
+            const fieldIndex = dibModuleMetadata
+                ? dibModuleMetadata.getDibFieldIndex(trace.field)
+                : -1;
+            dataBuffer.writeUint16(fieldIndex != -1 ? fieldIndex : 0);
+
+            // color
+            let color = assets.getColorIndexFromColorValue(trace.color);
+            if (isNaN(color)) {
+                color = 0;
+            }
+            dataBuffer.writeUint16(color);
+
+            // bit, -1 for a value trace
+            dataBuffer.writeInt16(isBitTrace(trace) ? trace.bit! : -1);
+
+            // reserved
+            dataBuffer.writeUint16(0);
+
+            // min
+            dataBuffer.writeObjectOffset(() =>
+                buildExpression(assets, dataBuffer, this, trace.min)
+            );
+
+            // max
+            dataBuffer.writeObjectOffset(() =>
+                buildExpression(assets, dataBuffer, this, trace.max)
+            );
+
+            // visible
+            dataBuffer.writeObjectOffset(() =>
+                buildExpression(assets, dataBuffer, this, trace.visible)
+            );
+        });
+    }
+}
+
+registerClass("YTChartWidget", YTChartWidget);
 
 ////////////////////////////////////////////////////////////////////////////////
 
